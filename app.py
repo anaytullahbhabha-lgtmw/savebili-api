@@ -115,40 +115,67 @@ def parse(req:ParseRequest, ip:str="unknown"):
     }
 
 @app.get("/api/download")
-def download(url:str, filename:str="video.mp4"):
+def download(url: str, filename: str = "video.mp4"):
     # This endpoint is intended for direct media URLs returned by yt-dlp.
-    if not url.startswith(("http://","https://")):
-        raise HTTPException(400,"Invalid media URL.")
-   # Only allow Bilibili and its known media CDN hosts.
-host=(urlparse(url).hostname or "").lower().rstrip(".")
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "Invalid media URL.")
 
-allowed_host=(
-    host == "bilibili.com"
-    or host.endswith(".bilibili.com")
-    or host == "bilibili.tv"
-    or host.endswith(".bilibili.tv")
-    or host == "hdslb.com"
-    or host.endswith(".hdslb.com")
-    or host == "bilivideo.com"
-    or host.endswith(".bilivideo.com")
-    or host == "akamaized.net"
-    or host.endswith(".akamaized.net")
-)
+    # Allow Bilibili and known Bilibili media/CDN hosts.
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
 
-if not allowed_host:
-    raise HTTPException(400,"Media host is not allowed.")
+    allowed_host = (
+        host == "bilibili.com"
+        or host.endswith(".bilibili.com")
+        or host == "bilibili.tv"
+        or host.endswith(".bilibili.tv")
+        or host == "hdslb.com"
+        or host.endswith(".hdslb.com")
+        or host == "bilivideo.com"
+        or host.endswith(".bilivideo.com")
+        or host == "akamaized.net"
+        or host.endswith(".akamaized.net")
+    )
+
+    if not allowed_host:
+        raise HTTPException(400, "Media host is not allowed.")
+
     import requests
+
     try:
-        r=requests.get(url,stream=True,timeout=30,headers={"User-Agent":"Mozilla/5.0"})
+        r = requests.get(
+            url,
+            stream=True,
+            timeout=30,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
         r.raise_for_status()
-    except Exception as e:
-        raise HTTPException(502,"Unable to fetch the media resource.")
-    safe=re.sub(r"[^A-Za-z0-9._-]+","_",filename)[:120] or "video.mp4"
-    ctype=r.headers.get("content-type") or mimetypes.guess_type(safe)[0] or "application/octet-stream"
+    except Exception:
+        raise HTTPException(502, "Unable to fetch the media resource.")
+
+    safe = re.sub(
+        r"[^A-Za-z0-9._-]+",
+        "_",
+        filename
+    )[:120] or "video.mp4"
+
+    ctype = (
+        r.headers.get("content-type")
+        or mimetypes.guess_type(safe)[0]
+        or "application/octet-stream"
+    )
+
     def iterator():
         try:
-            for chunk in r.iter_content(1024*1024):
-                if chunk: yield chunk
+            for chunk in r.iter_content(1024 * 1024):
+                if chunk:
+                    yield chunk
         finally:
             r.close()
-    return StreamingResponse(iterator(),media_type=ctype,headers={"Content-Disposition":f'attachment; filename="{safe}"'})
+
+    return StreamingResponse(
+        iterator(),
+        media_type=ctype,
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe}"'
+        }
+    )
