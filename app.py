@@ -119,11 +119,24 @@ def download(url:str, filename:str="video.mp4"):
     # This endpoint is intended for direct media URLs returned by yt-dlp.
     if not url.startswith(("http://","https://")):
         raise HTTPException(400,"Invalid media URL.")
-    # Basic SSRF guard: only accept Bilibili/CDN-like URLs from the extractor.
-    host=(urlparse(url).hostname or "").lower()
-    allowed_host=("bilibili" in host or "hdslb" in host or "bilivideo" in host or host.endswith(".akamaized.net"))
-    if not allowed_host:
-        raise HTTPException(400,"Media host is not allowed.")
+   # Only allow Bilibili and its known media CDN hosts.
+host=(urlparse(url).hostname or "").lower().rstrip(".")
+
+allowed_host=(
+    host == "bilibili.com"
+    or host.endswith(".bilibili.com")
+    or host == "bilibili.tv"
+    or host.endswith(".bilibili.tv")
+    or host == "hdslb.com"
+    or host.endswith(".hdslb.com")
+    or host == "bilivideo.com"
+    or host.endswith(".bilivideo.com")
+    or host == "akamaized.net"
+    or host.endswith(".akamaized.net")
+)
+
+if not allowed_host:
+    raise HTTPException(400,"Media host is not allowed.")
     import requests
     try:
         r=requests.get(url,stream=True,timeout=30,headers={"User-Agent":"Mozilla/5.0"})
