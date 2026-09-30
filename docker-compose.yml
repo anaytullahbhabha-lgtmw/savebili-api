@@ -1,0 +1,10 @@
+services:
+  savebili-api:
+    build: .
+    container_name: savebili-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      CORS_ORIGINS: "https://YOUR-WORDPRESS-DOMAIN.com"
+      RATE_LIMIT_SECONDS: "2"
