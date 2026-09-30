@@ -121,7 +121,7 @@ def download(url:str, filename:str="video.mp4"):
         raise HTTPException(400,"Invalid media URL.")
     # Basic SSRF guard: only accept Bilibili/CDN-like URLs from the extractor.
     host=(urlparse(url).hostname or "").lower()
-    allowed_host=("bilibili" in host or "hdslb" in host or "bilivideo" in host)
+    allowed_host=("bilibili" in host or "hdslb" in host or "bilivideo" in host or host.endswith(".akamaized.net"))
     if not allowed_host:
         raise HTTPException(400,"Media host is not allowed.")
     import requests
