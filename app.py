@@ -116,12 +116,11 @@ def parse(req:ParseRequest, ip:str="unknown"):
 
 @app.get("/api/download")
 def download(url: str, filename: str = "video.mp4"):
-    # This endpoint is intended for direct media URLs returned by yt-dlp.
     if not url.startswith(("http://", "https://")):
         raise HTTPException(400, "Invalid media URL.")
 
     # Allow Bilibili and known Bilibili media/CDN hosts.
-    host = (urlparse(url).hostname or "").lower().rstrip(".")
+       host = (urlparse(url).hostname or "").lower().rstrip(".")
 
     allowed_host = (
         host == "bilibili.com"
