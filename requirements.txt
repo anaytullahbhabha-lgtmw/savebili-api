@@ -1,4 +1,4 @@
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
-yt-dlp
+yt-dlp[default]
 requests==2.32.3
