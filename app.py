@@ -120,7 +120,7 @@ def download(url: str, filename: str = "video.mp4"):
         raise HTTPException(400, "Invalid media URL.")
 
     # Allow Bilibili and known Bilibili media/CDN hosts.
-           host = (urlparse(url).hostname or "").lower().rstrip(".")
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
     allowed_host = (
         host == "bilibili.com"
         or host.endswith(".bilibili.com")
