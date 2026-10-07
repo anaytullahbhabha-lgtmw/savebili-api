@@ -63,6 +63,38 @@ def valid_bilibili(url: str) -> bool:
         return False
 
 
+def normalize_bilibili_input(value: str) -> str:
+    """Accept bare BV/AV IDs and b23.tv links, return a full Bilibili URL.
+
+    The frontend placeholders suggest bare BV IDs work, so normalize:
+    - 'BV17x411w7KC' -> 'https://www.bilibili.com/video/BV17x411w7KC'
+    - 'av170001' / 'AV170001' -> 'https://www.bilibili.com/video/av170001'
+    - full URLs pass through unchanged
+    """
+    value = (value or "").strip()
+
+    if not value:
+        return value
+
+    # Already a URL — pass through
+    if value.startswith(("http://", "https://")):
+        return value
+
+    # Bare BV ID (BV + 10 alphanumeric chars)
+    if re.match(r"^BV[a-zA-Z0-9]{10}$", value):
+        return f"https://www.bilibili.com/video/{value}"
+
+    # Bare AV ID (av/AV + digits)
+    if re.match(r"^[aA][vV]\d+$", value):
+        return f"https://www.bilibili.com/video/{value.lower()}"
+
+    # b23.tv short link without scheme
+    if value.startswith("b23.tv/"):
+        return f"https://{value}"
+
+    return value
+
+
 def check_rate(ip):
     now = time.time()
     last = _last_by_ip.get(ip, 0)
@@ -124,7 +156,7 @@ def parse(req: ParseRequest, ip: str = "unknown"):
 
     check_rate(ip)
 
-    url = req.url.strip()
+    url = normalize_bilibili_input(req.url.strip())
 
     if not valid_bilibili(url):
         raise HTTPException(
@@ -339,7 +371,8 @@ def download_merged(
     filename: str = "video.mp4"
 ):
 
-    # Validate Bilibili page URL
+    # Normalize bare BV/AV IDs, then validate Bilibili page URL
+    url = normalize_bilibili_input(url)
     if not valid_bilibili(url):
         raise HTTPException(
             400,
@@ -469,7 +502,8 @@ def download_audio(
 
     check_rate(ip)
 
-    # Validate Bilibili page URL
+    # Normalize bare BV/AV IDs, then validate Bilibili page URL
+    url = normalize_bilibili_input(url)
     if not valid_bilibili(url):
         raise HTTPException(
             400,
@@ -617,7 +651,7 @@ def metadata(url: str, ip: str = "unknown"):
 
     check_rate(ip)
 
-    url = (url or "").strip()
+    url = normalize_bilibili_input((url or "").strip())
 
     if not valid_bilibili(url):
         raise HTTPException(
@@ -746,7 +780,7 @@ def subtitles_list(url: str, ip: str = "unknown"):
 
     check_rate(ip)
 
-    url = (url or "").strip()
+    url = normalize_bilibili_input((url or "").strip())
 
     if not valid_bilibili(url):
         raise HTTPException(
@@ -782,7 +816,7 @@ def subtitles_download(
 
     check_rate(ip)
 
-    url = (url or "").strip()
+    url = normalize_bilibili_input((url or "").strip())
     lang = (lang or "en").strip()
 
     if not valid_bilibili(url):
