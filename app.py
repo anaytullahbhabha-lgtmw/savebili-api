@@ -455,6 +455,160 @@ def download_merged(
 
 
 # ============================================================
+# AUDIO DOWNLOAD (M4A + MP3)
+# ============================================================
+
+@app.get("/api/download-audio")
+def download_audio(
+    url: str,
+    audio_format_id: str = None,
+    filename: str = "audio.mp3",
+    format: str = "mp3",
+    ip: str = "unknown"
+):
+
+    check_rate(ip)
+
+    # Validate Bilibili page URL
+    if not valid_bilibili(url):
+        raise HTTPException(
+            400,
+            "Please enter a valid public Bilibili URL."
+        )
+
+    # Validate output format
+    format = (format or "mp3").lower().strip()
+    if format not in ("mp3", "m4a"):
+        raise HTTPException(
+            400,
+            "Format must be 'mp3' or 'm4a'."
+        )
+
+    # Create temporary directory
+    tmpdir = tempfile.mkdtemp(
+        prefix="savebili-audio-"
+    )
+
+    output_template = os.path.join(
+        tmpdir,
+        "%(id)s.%(ext)s"
+    )
+
+    ydl_options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "socket_timeout": 30,
+        "retries": 2,
+        "outtmpl": output_template,
+        "extractor_args": {
+            "bilibili": {
+                "prefer_multi_flv": False
+            }
+        },
+    }
+
+    # Select specific audio format if provided, else best audio
+    if audio_format_id:
+        ydl_options["format"] = audio_format_id
+    else:
+        ydl_options["format"] = "bestaudio/best"
+
+    # Add MP3 conversion via FFmpeg postprocessor
+    if format == "mp3":
+        ydl_options["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }]
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_options) as ydl:
+            info = ydl.extract_info(
+                url,
+                download=True
+            )
+
+        # Find the final audio file
+        if format == "mp3":
+            audio_files = list(
+                pathlib.Path(tmpdir).glob("*.mp3")
+            )
+        else:
+            audio_files = list(
+                pathlib.Path(tmpdir).glob("*.m4a")
+            )
+            # Fallback: any audio file
+            if not audio_files:
+                for ext in ("*.aac", "*.opus", "*.webm"):
+                    audio_files = list(
+                        pathlib.Path(tmpdir).glob(ext)
+                    )
+                    if audio_files:
+                        break
+
+        if not audio_files:
+            raise Exception(
+                f"Could not extract {format.upper()} audio from this video."
+            )
+
+        final_file = audio_files[0]
+
+        # Sanitize filename
+        safe_filename = re.sub(
+            r"[^A-Za-z0-9._-]+",
+            "_",
+            filename
+        )[:120]
+
+        if not safe_filename:
+            safe_filename = f"audio.{format}"
+
+        # Ensure correct extension
+        if not safe_filename.lower().endswith(f".{format}"):
+            # Remove old extension and add correct one
+            safe_filename = re.sub(
+                r"\.[a-zA-Z0-9]+$",
+                "",
+                safe_filename
+            ) + f".{format}"
+
+        media_type = (
+            "audio/mpeg"
+            if format == "mp3"
+            else "audio/mp4"
+        )
+
+        return FileResponse(
+            path=str(final_file),
+            media_type=media_type,
+            filename=safe_filename,
+            background=BackgroundTask(
+                shutil.rmtree,
+                tmpdir,
+                ignore_errors=True
+            )
+        )
+
+    except HTTPException:
+        shutil.rmtree(
+            tmpdir,
+            ignore_errors=True
+        )
+        raise
+
+    except Exception as e:
+        shutil.rmtree(
+            tmpdir,
+            ignore_errors=True
+        )
+        raise HTTPException(
+            422,
+            f"Unable to download audio: {str(e)[:500]}"
+        )
+
+
+# ============================================================
 # VIDEO METADATA VIEWER
 # ============================================================
 
