@@ -24,7 +24,7 @@ RATE_LIMIT_SECONDS = float(os.getenv("RATE_LIMIT_SECONDS", "2"))
 _last_by_ip = {}
 
 
-app = FastAPI(title=APP_NAME, version="2.1.0")
+app = FastAPI(title=APP_NAME, version="2.2.0")
 
 allowed = os.getenv("CORS_ORIGINS", "*")
 origins = [x.strip() for x in allowed.split(",") if x.strip()]
@@ -451,4 +451,269 @@ def download_merged(
         raise HTTPException(
             422,
             f"Unable to download and merge video: {str(e)[:500]}"
+        )
+
+
+# ============================================================
+# VIDEO METADATA VIEWER
+# ============================================================
+
+@app.get("/api/metadata")
+def metadata(url: str, ip: str = "unknown"):
+
+    check_rate(ip)
+
+    url = (url or "").strip()
+
+    if not valid_bilibili(url):
+        raise HTTPException(
+            400,
+            "Please enter a valid public Bilibili URL."
+        )
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts()) as ydl:
+            info = ydl.extract_info(
+                url,
+                download=False
+            )
+
+    except Exception as e:
+        msg = str(e)
+
+        if "login" in msg.lower():
+            msg = (
+                "This video appears to require login "
+                "or is not publicly accessible."
+            )
+
+        raise HTTPException(
+            422,
+            msg[:500]
+        )
+
+    thumbs = []
+
+    for t in (info.get("thumbnails") or [])[-6:]:
+        if t.get("url"):
+            thumbs.append({
+                "url": t.get("url"),
+                "width": t.get("width"),
+                "height": t.get("height"),
+            })
+
+    heights = sorted({
+        f.get("height")
+        for f in (info.get("formats") or [])
+        if f.get("height")
+    })
+
+    raw_date = info.get("upload_date") or ""
+
+    upload_date = (
+        f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+        if len(raw_date) == 8 and raw_date.isdigit()
+        else raw_date
+    )
+
+    return {
+        "id": info.get("id"),
+        "title": info.get("title") or "Bilibili video",
+        "webpage_url": info.get("webpage_url") or url,
+        "uploader": (
+            info.get("uploader")
+            or info.get("channel")
+        ),
+        "uploader_id": info.get("uploader_id"),
+        "duration": info.get("duration"),
+        "duration_string": human_duration(
+            info.get("duration")
+        ),
+        "upload_date": upload_date,
+        "view_count": info.get("view_count"),
+        "like_count": info.get("like_count"),
+        "comment_count": info.get("comment_count"),
+        "description": (
+            info.get("description") or ""
+        )[:2000],
+        "tags": info.get("tags") or [],
+        "categories": info.get("categories") or [],
+        "thumbnail": info.get("thumbnail"),
+        "thumbnails": thumbs,
+        "available_heights": heights,
+        "format_count": len(
+            info.get("formats") or []
+        ),
+        "has_subtitles": bool(
+            info.get("subtitles")
+            or info.get("automatic_captions")
+        ),
+    }
+
+
+# ============================================================
+# SUBTITLE LIST + DOWNLOAD (SRT)
+# ============================================================
+
+def _subtitle_tracks(info):
+    tracks = []
+
+    for kind in ("subtitles", "automatic_captions"):
+        subs = info.get(kind) or {}
+
+        for lang, items in subs.items():
+            for it in items or []:
+                if it.get("url"):
+                    tracks.append({
+                        "lang": lang,
+                        "name": it.get("name") or lang,
+                        "ext": it.get("ext") or "vtt",
+                        "automatic": (
+                            kind == "automatic_captions"
+                        ),
+                    })
+                    break
+
+    # Dedupe by language, preferring manual tracks.
+    seen = {}
+
+    for t in tracks:
+        if (
+            t["lang"] not in seen
+            or not t["automatic"]
+        ):
+            seen[t["lang"]] = t
+
+    return list(seen.values())
+
+
+@app.get("/api/subtitles")
+def subtitles_list(url: str, ip: str = "unknown"):
+
+    check_rate(ip)
+
+    url = (url or "").strip()
+
+    if not valid_bilibili(url):
+        raise HTTPException(
+            400,
+            "Please enter a valid public Bilibili URL."
+        )
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts()) as ydl:
+            info = ydl.extract_info(
+                url,
+                download=False
+            )
+
+    except Exception as e:
+        raise HTTPException(
+            422,
+            str(e)[:500]
+        )
+
+    return {
+        "title": info.get("title") or "Bilibili video",
+        "subtitles": _subtitle_tracks(info),
+    }
+
+
+@app.get("/api/subtitles/download")
+def subtitles_download(
+    url: str,
+    lang: str = "en",
+    ip: str = "unknown"
+):
+
+    check_rate(ip)
+
+    url = (url or "").strip()
+    lang = (lang or "en").strip()
+
+    if not valid_bilibili(url):
+        raise HTTPException(
+            400,
+            "Please enter a valid public Bilibili URL."
+        )
+
+    if not re.match(r"^[A-Za-z0-9_-]{2,12}$", lang):
+        raise HTTPException(
+            400,
+            "Invalid subtitle language code."
+        )
+
+    tmpdir = tempfile.mkdtemp(
+        prefix="savebili-sub-"
+    )
+
+    try:
+        opts = ydl_opts()
+        opts.update({
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "sublangs": [lang],
+            "convertsubtitles": "srt",
+            "outtmpl": os.path.join(
+                tmpdir,
+                "%(id)s.%(ext)s"
+            ),
+        })
+
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(
+                url,
+                download=True
+            )
+
+        srt_files = list(
+            pathlib.Path(tmpdir).glob("*.srt")
+        )
+
+        if not srt_files:
+            raise HTTPException(
+                404,
+                (
+                    f"No subtitles found for "
+                    f"language '{lang}' on this video."
+                )
+            )
+
+        srt_file = srt_files[0]
+
+        title = re.sub(
+            r"[^A-Za-z0-9._-]+",
+            "_",
+            info.get("title") or "subtitles"
+        )[:80]
+
+        filename = f"{title}.{lang}.srt"
+
+        return FileResponse(
+            path=str(srt_file),
+            media_type="text/plain",
+            filename=filename,
+            background=BackgroundTask(
+                shutil.rmtree,
+                tmpdir,
+                ignore_errors=True
+            )
+        )
+
+    except HTTPException:
+        shutil.rmtree(
+            tmpdir,
+            ignore_errors=True
+        )
+        raise
+
+    except Exception as e:
+        shutil.rmtree(
+            tmpdir,
+            ignore_errors=True
+        )
+        raise HTTPException(
+            422,
+            f"Unable to download subtitles: {str(e)[:500]}"
         )
