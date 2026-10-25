@@ -1,10 +1,12 @@
 import os
 import re
+import json
 import time
 import tempfile
 import pathlib
 import mimetypes
 import shutil
+import subprocess
 
 from urllib.parse import urlparse
 
@@ -14,7 +16,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
+import requests
 import yt_dlp
+
+import bili_fallback
 
 
 APP_NAME = "SaveBili API"
@@ -172,18 +177,25 @@ def parse(req: ParseRequest, ip: str = "unknown"):
             )
 
     except Exception as e:
-        msg = str(e)
+        # yt-dlp extraction broken since Bilibili dropped
+        # __INITIAL_STATE__ — fall back to the web APIs.
+        try:
+            info = bili_fallback.fallback_info(url)
+        except HTTPException:
+            raise
+        except Exception:
+            msg = str(e)
 
-        if "login" in msg.lower():
-            msg = (
-                "This video appears to require login "
-                "or is not publicly accessible."
+            if "login" in msg.lower():
+                msg = (
+                    "This video appears to require login "
+                    "or is not publicly accessible."
+                )
+
+            raise HTTPException(
+                422,
+                msg[:500]
             )
-
-        raise HTTPException(
-            422,
-            msg[:500]
-        )
 
     formats = []
     seen = set()
@@ -475,6 +487,83 @@ def download_merged(
 
     except Exception as e:
 
+        # Fall back to direct stream download + ffmpeg merge.
+        try:
+            fb = bili_fallback.fallback_info(url)
+            dash = bili_fallback.playurl(
+                url, fb.get("_fallback_cid")
+            )
+            videos = dash.get("video") or []
+            audios = dash.get("audio") or []
+            if videos and audios:
+                vstream = next(
+                    (
+                        v for v in videos
+                        if str(v.get("id"))
+                        == str(video_format_id)
+                    ),
+                    max(
+                        videos,
+                        key=lambda x: x.get("height") or 0,
+                    ),
+                )
+                astream = next(
+                    (
+                        a for a in audios
+                        if str(a.get("id"))
+                        == str(audio_format_id)
+                    ),
+                    audios[0],
+                )
+                vpath = os.path.join(tmpdir, "v.mp4")
+                apath = os.path.join(tmpdir, "a.m4a")
+                bili_fallback.download_stream(
+                    vstream.get("baseUrl")
+                    or vstream.get("base_url"),
+                    vpath,
+                )
+                bili_fallback.download_stream(
+                    astream.get("baseUrl")
+                    or astream.get("base_url"),
+                    apath,
+                )
+                merged = os.path.join(tmpdir, "merged.mp4")
+                proc = subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-i", vpath, "-i", apath,
+                        "-c", "copy", merged,
+                    ],
+                    capture_output=True,
+                    timeout=300,
+                )
+                if proc.returncode == 0 and os.path.exists(
+                    merged
+                ):
+                    safe_filename = re.sub(
+                        r"[^A-Za-z0-9._-]+",
+                        "_",
+                        filename,
+                    )[:120]
+                    if not safe_filename:
+                        safe_filename = "video.mp4"
+                    if not safe_filename.lower().endswith(
+                        ".mp4"
+                    ):
+                        safe_filename += ".mp4"
+                    return FileResponse(
+                        path=merged,
+                        media_type="video/mp4",
+                        filename=safe_filename,
+                        background=BackgroundTask(
+                            shutil.rmtree,
+                            tmpdir,
+                            ignore_errors=True,
+                        ),
+                    )
+        except Exception:
+            pass
+
         # Cleanup if something fails
         shutil.rmtree(
             tmpdir,
@@ -632,6 +721,76 @@ def download_audio(
         raise
 
     except Exception as e:
+        # Fall back to direct audio-stream download + ffmpeg.
+        try:
+            fb = bili_fallback.fallback_info(url)
+            dash = bili_fallback.playurl(
+                url, fb.get("_fallback_cid")
+            )
+            audios = dash.get("audio") or []
+            if audios:
+                astream = next(
+                    (
+                        a for a in audios
+                        if audio_format_id
+                        and str(a.get("id"))
+                        == str(audio_format_id)
+                    ),
+                    audios[0],
+                )
+                raw = os.path.join(tmpdir, "raw.m4a")
+                bili_fallback.download_stream(
+                    astream.get("baseUrl")
+                    or astream.get("base_url"),
+                    raw,
+                )
+                safe_filename = re.sub(
+                    r"[^A-Za-z0-9._-]+",
+                    "_",
+                    filename,
+                )[:120]
+                if not safe_filename:
+                    safe_filename = f"audio.{format}"
+                if format == "mp3":
+                    out = os.path.join(tmpdir, "out.mp3")
+                    proc = subprocess.run(
+                        [
+                            "ffmpeg", "-y", "-i", raw,
+                            "-vn", "-codec:a", "libmp3lame",
+                            "-q:a", "2", out,
+                        ],
+                        capture_output=True,
+                        timeout=300,
+                    )
+                    if proc.returncode != 0:
+                        raise Exception(
+                            "ffmpeg mp3 conversion failed"
+                        )
+                    final_file = out
+                    media_type = "audio/mpeg"
+                else:
+                    final_file = raw
+                    media_type = "audio/mp4"
+                if not safe_filename.lower().endswith(
+                    f".{format}"
+                ):
+                    safe_filename = re.sub(
+                        r"\.[a-zA-Z0-9]+$",
+                        "",
+                        safe_filename,
+                    ) + f".{format}"
+                return FileResponse(
+                    path=final_file,
+                    media_type=media_type,
+                    filename=safe_filename,
+                    background=BackgroundTask(
+                        shutil.rmtree,
+                        tmpdir,
+                        ignore_errors=True,
+                    ),
+                )
+        except Exception:
+            pass
         shutil.rmtree(
             tmpdir,
             ignore_errors=True
@@ -667,18 +826,25 @@ def metadata(url: str, ip: str = "unknown"):
             )
 
     except Exception as e:
-        msg = str(e)
+        # yt-dlp extraction broken since Bilibili dropped
+        # __INITIAL_STATE__ — fall back to the web APIs.
+        try:
+            info = bili_fallback.fallback_info(url)
+        except HTTPException:
+            raise
+        except Exception:
+            msg = str(e)
 
-        if "login" in msg.lower():
-            msg = (
-                "This video appears to require login "
-                "or is not publicly accessible."
+            if "login" in msg.lower():
+                msg = (
+                    "This video appears to require login "
+                    "or is not publicly accessible."
+                )
+
+            raise HTTPException(
+                422,
+                msg[:500]
             )
-
-        raise HTTPException(
-            422,
-            msg[:500]
-        )
 
     thumbs = []
 
@@ -743,6 +909,24 @@ def metadata(url: str, ip: str = "unknown"):
 # SUBTITLE LIST + DOWNLOAD (SRT)
 # ============================================================
 
+def _bili_sub_json(sub_url):
+    """Fetch a Bilibili subtitle JSON file."""
+    r = requests.get(
+        sub_url,
+        timeout=20,
+        headers={
+            "Referer": "https://www.bilibili.com/",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        },
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 def _subtitle_tracks(info):
     tracks = []
 
@@ -796,10 +980,30 @@ def subtitles_list(url: str, ip: str = "unknown"):
             )
 
     except Exception as e:
-        raise HTTPException(
-            422,
-            str(e)[:500]
-        )
+        # Fall back to the player API subtitle list.
+        try:
+            parts = bili_fallback.pagelist(url)
+            if not parts:
+                raise HTTPException(
+                    422,
+                    "Unable to fetch video info from Bilibili.",
+                )
+            tracks = bili_fallback.subtitle_list(
+                url, parts[0].get("cid")
+            )
+            return {
+                "title": (
+                    parts[0].get("part") or "Bilibili video"
+                ),
+                "subtitles": tracks,
+            }
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                422,
+                str(e)[:500]
+            )
 
     return {
         "title": info.get("title") or "Bilibili video",
@@ -897,6 +1101,62 @@ def subtitles_download(
         raise
 
     except Exception as e:
+        # Fall back to the player API: fetch the subtitle JSON
+        # for the requested language and convert it to SRT.
+        try:
+            parts = bili_fallback.pagelist(url)
+            if parts:
+                tracks = bili_fallback.subtitle_list(
+                    url, parts[0].get("cid")
+                )
+                match = None
+                for t in tracks:
+                    if t["lang"].lower().startswith(
+                        lang.lower()[:2]
+                    ):
+                        match = t
+                        break
+                if not match and tracks:
+                    match = tracks[0]
+                if match:
+                    sub_json = _bili_sub_json(match["url"])
+                    srt_text = bili_fallback.json_to_srt(
+                        sub_json
+                    )
+                    if srt_text.strip():
+                        srt_path = os.path.join(
+                            tmpdir, "subtitles.srt"
+                        )
+                        with open(
+                            srt_path, "w", encoding="utf-8"
+                        ) as f:
+                            f.write(srt_text)
+                        title = re.sub(
+                            r"[^A-Za-z0-9._-]+",
+                            "_",
+                            parts[0].get("part")
+                            or "subtitles",
+                        )[:80]
+                        return FileResponse(
+                            path=srt_path,
+                            media_type="text/plain",
+                            filename=(
+                                f"{title}.{lang}.srt"
+                            ),
+                            background=BackgroundTask(
+                                shutil.rmtree,
+                                tmpdir,
+                                ignore_errors=True
+                            )
+                        )
+        except HTTPException:
+            shutil.rmtree(
+                tmpdir,
+                ignore_errors=True
+            )
+            raise
+        except Exception:
+            pass
         shutil.rmtree(
             tmpdir,
             ignore_errors=True
