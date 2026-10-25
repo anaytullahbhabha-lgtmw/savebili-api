@@ -101,6 +101,55 @@ def playurl(url, cid):
     return data.get("dash") or {}
 
 
+def playurl_html5(url, cid):
+    """Progressive (durl) streams via the html5 player variant.
+
+    Anonymous DASH streams cap at 480p, but the html5 variant
+    returns a combined video+audio file at up to 720p for the
+    same video. Returns (quality_code, durl_list).
+    """
+    params = id_params(url)
+    if not params or not cid:
+        return None, []
+    params.update({
+        "cid": cid,
+        "qn": 80,
+        "fnval": 16,
+        "platform": "html5",
+    })
+    data = _get("/x/player/playurl", params)
+    if not isinstance(data, dict):
+        return None, []
+    return data.get("quality"), (data.get("durl") or [])
+
+
+# Bilibili quality-tier codes -> player labels.
+QUALITY_LABELS = {
+    120: "4K",
+    112: "1080p+",
+    80: "1080p",
+    74: "720p60",
+    64: "720p",
+    32: "480p",
+    16: "360p",
+    6: "240p",
+}
+
+# Tier code -> representative pixel height, so the parse endpoint
+# (which labels/sorts by height) treats a progressive file like
+# the tier Bilibili serves it as.
+QUALITY_HEIGHTS = {
+    120: 2160,
+    112: 1080,
+    80: 1080,
+    74: 720,
+    64: 720,
+    32: 480,
+    16: 360,
+    6: 240,
+}
+
+
 def subtitle_list(url, cid):
     """Subtitle tracks from the player API for one part."""
     params = id_params(url)
@@ -297,6 +346,33 @@ def fallback_info(url):
             "vcodec": best_v["vcodec"],
             "acodec": best_a["acodec"],
         })
+
+    # Progressive html5 file(s): anonymous DASH caps at 480p, but
+    # the html5 variant serves a combined file up to 720p. Offer
+    # it FIRST so users get the best actually downloadable file.
+    try:
+        durl_quality, durl = playurl_html5(url, cid)
+    except Exception:
+        durl_quality, durl = None, []
+    durl_formats = []
+    for d in durl:
+        durl_url = d.get("url")
+        if not durl_url:
+            continue
+        durl_formats.append({
+            "id": "durl",
+            "format_id": "durl",
+            "label": QUALITY_LABELS.get(durl_quality, "HD"),
+            "ext": "mp4",
+            "url": durl_url,
+            "filesize": d.get("size"),
+            "height": QUALITY_HEIGHTS.get(durl_quality),
+            "fps": None,
+            "vcodec": "combined",
+            "acodec": "combined",
+        })
+    if durl_formats:
+        formats = durl_formats + formats
 
     duration = part.get("duration")
     bvid, aid = extract_ids(url)

@@ -379,7 +379,7 @@ def download(
 def download_merged(
     url: str,
     video_format_id: str,
-    audio_format_id: str,
+    audio_format_id: str = "",
     filename: str = "video.mp4"
 ):
 
@@ -392,7 +392,9 @@ def download_merged(
         )
 
     # Basic validation for format IDs
-    if not video_format_id or not audio_format_id:
+    if not video_format_id or (
+        not audio_format_id and video_format_id != "durl"
+    ):
         raise HTTPException(
             400,
             "Both video_format_id and audio_format_id are required."
@@ -490,6 +492,40 @@ def download_merged(
         # Fall back to direct stream download + ffmpeg merge.
         try:
             fb = bili_fallback.fallback_info(url)
+            # Progressive html5 file: already combined video+audio,
+            # no merge needed — just download and return it.
+            if video_format_id == "durl":
+                _, durl = bili_fallback.playurl_html5(
+                    url, fb.get("_fallback_cid")
+                )
+                if durl and durl[0].get("url"):
+                    direct = os.path.join(
+                        tmpdir, "direct.mp4"
+                    )
+                    bili_fallback.download_stream(
+                        durl[0]["url"], direct
+                    )
+                    safe_filename = re.sub(
+                        r"[^A-Za-z0-9._-]+",
+                        "_",
+                        filename,
+                    )[:120]
+                    if not safe_filename:
+                        safe_filename = "video.mp4"
+                    if not safe_filename.lower().endswith(
+                        ".mp4"
+                    ):
+                        safe_filename += ".mp4"
+                    return FileResponse(
+                        path=direct,
+                        media_type="video/mp4",
+                        filename=safe_filename,
+                        background=BackgroundTask(
+                            shutil.rmtree,
+                            tmpdir,
+                            ignore_errors=True,
+                        ),
+                    )
             dash = bili_fallback.playurl(
                 url, fb.get("_fallback_cid")
             )
