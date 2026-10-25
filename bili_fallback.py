@@ -9,6 +9,7 @@ public response shapes of every endpoint stay unchanged.
 """
 
 import re
+import os
 import time
 
 import requests
@@ -26,6 +27,18 @@ BILI_HEADERS = {
 
 _session = requests.Session()
 _session.headers.update(BILI_HEADERS)
+
+# Optional Bilibili login: Bilibili serves 1080p DASH streams only
+# to logged-in sessions; anonymous requests cap at 480p DASH /
+# 720p progressive. When BILI_SESSDATA is set (Render env var, never
+# in code), its cookie is sent with every API call and stream
+# download, unlocking the account's qualities. Without it the
+# fallback works exactly as before. The value is never logged.
+_sessdata = os.getenv("BILI_SESSDATA", "").strip()
+if _sessdata:
+    _session.cookies.set(
+        "SESSDATA", _sessdata, domain=".bilibili.com"
+    )
 
 
 def _get(path, params):
