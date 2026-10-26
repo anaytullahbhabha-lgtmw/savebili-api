@@ -117,9 +117,14 @@ def playurl(url, cid):
 def playurl_html5(url, cid):
     """Progressive (durl) streams via the html5 player variant.
 
-    Anonymous DASH streams cap at 480p, but the html5 variant
-    returns a combined video+audio file at up to 720p for the
-    same video. Returns (quality_code, durl_list).
+    Anonymous DASH streams cap at 480p; the html5 variant returns
+    a combined video+audio file whose actual resolution varies by
+    video. Returns (quality_code, durl_list).
+
+    NOTE: quality_code is the video's availability tier, NOT the
+    delivered stream's resolution. Verified 2026-10-26: a tier-112
+    video's anonymous progressive file was actually 512x288, so the
+    tier code must never be mapped to a height claim.
     """
     params = id_params(url)
     if not params or not cid:
@@ -136,31 +141,13 @@ def playurl_html5(url, cid):
     return data.get("quality"), (data.get("durl") or [])
 
 
-# Bilibili quality-tier codes -> player labels.
-QUALITY_LABELS = {
-    120: "4K",
-    112: "1080p+",
-    80: "1080p",
-    74: "720p60",
-    64: "720p",
-    32: "480p",
-    16: "360p",
-    6: "240p",
-}
-
-# Tier code -> representative pixel height, so the parse endpoint
-# (which labels/sorts by height) treats a progressive file like
-# the tier Bilibili serves it as.
-QUALITY_HEIGHTS = {
-    120: 2160,
-    112: 1080,
-    80: 1080,
-    74: 720,
-    64: 720,
-    32: 480,
-    16: 360,
-    6: 240,
-}
+# NOTE (2026-10-26): Bilibili quality-tier codes used to be mapped to
+# pixel heights for the progressive (durl) format. That mapping was WRONG:
+# the tier code describes what quality the video is available in, not the
+# resolution of the anonymous progressive file actually served (a tier-112
+# video served a 512x288 file). The maps were removed; the durl format now
+# claims no height and is labelled "Progressive". The widget renders it as
+# "Video • <size> • combined", which is honest for every video.
 
 
 def subtitle_list(url, cid):
@@ -361,8 +348,12 @@ def fallback_info(url):
         })
 
     # Progressive html5 file(s): anonymous DASH caps at 480p, but
-    # the html5 variant serves a combined file up to 720p. Offer
-    # it FIRST so users get the best actually downloadable file.
+    # the html5 variant serves a combined file that is often the
+    # best actually downloadable file (verified real 720p on one
+    # video, 288p on another). Offer it FIRST. Its height is left
+    # as None on purpose: the tier code is not the delivered
+    # resolution (see playurl_html5 note), so claiming one would
+    # mislabel the quality picker.
     try:
         durl_quality, durl = playurl_html5(url, cid)
     except Exception:
@@ -375,11 +366,11 @@ def fallback_info(url):
         durl_formats.append({
             "id": "durl",
             "format_id": "durl",
-            "label": QUALITY_LABELS.get(durl_quality, "HD"),
+            "label": "Progressive",
             "ext": "mp4",
             "url": durl_url,
             "filesize": d.get("size"),
-            "height": QUALITY_HEIGHTS.get(durl_quality),
+            "height": None,
             "fps": None,
             "vcodec": "combined",
             "acodec": "combined",
