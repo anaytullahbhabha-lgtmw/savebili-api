@@ -8,7 +8,7 @@ import mimetypes
 import shutil
 import subprocess
 
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse, FileResponse
@@ -81,8 +81,25 @@ def normalize_bilibili_input(value: str) -> str:
     if not value:
         return value
 
-    # Already a URL — pass through
+    # Already a URL — pass through, except Bilibili's /en/ locale
+    # prefix: yt-dlp returns metadata but zero streams for
+    # bilibili.com/en/video/... URLs (verified 2026-10-26 with
+    # BV1MtnG6NEGF), while the standard form works. Strip it so
+    # every downstream path (parse, downloads) sees the
+    # canonical form. bilibili.tv is left untouched (unverified).
     if value.startswith(("http://", "https://")):
+        try:
+            p = urlparse(value)
+            host = (p.hostname or "").lower()
+            if (
+                host == "bilibili.com"
+                or host.endswith(".bilibili.com")
+            ) and p.path.startswith("/en/"):
+                value = urlunparse(
+                    p._replace(path=p.path[3:])
+                )
+        except Exception:
+            pass
         return value
 
     # Bare BV ID (BV + 10 alphanumeric chars)
@@ -156,47 +173,8 @@ def health():
     }
 
 
-@app.post("/api/parse")
-def parse(req: ParseRequest, ip: str = "unknown"):
-
-    check_rate(ip)
-
-    url = normalize_bilibili_input(req.url.strip())
-
-    if not valid_bilibili(url):
-        raise HTTPException(
-            400,
-            "Please enter a valid public Bilibili URL."
-        )
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts()) as ydl:
-            info = ydl.extract_info(
-                url,
-                download=False
-            )
-
-    except Exception as e:
-        # yt-dlp extraction broken since Bilibili dropped
-        # __INITIAL_STATE__ — fall back to the web APIs.
-        try:
-            info = bili_fallback.fallback_info(url)
-        except HTTPException:
-            raise
-        except Exception:
-            msg = str(e)
-
-            if "login" in msg.lower():
-                msg = (
-                    "This video appears to require login "
-                    "or is not publicly accessible."
-                )
-
-            raise HTTPException(
-                422,
-                msg[:500]
-            )
-
+def build_formats(info):
+    """Normalize one extractor's raw formats into download options."""
     formats = []
     seen = set()
 
@@ -266,6 +244,67 @@ def parse(req: ParseRequest, ip: str = "unknown"):
         ),
         reverse=True
     )
+
+    return formats
+
+
+@app.post("/api/parse")
+def parse(req: ParseRequest, ip: str = "unknown"):
+
+    check_rate(ip)
+
+    url = normalize_bilibili_input(req.url.strip())
+
+    if not valid_bilibili(url):
+        raise HTTPException(
+            400,
+            "Please enter a valid public Bilibili URL."
+        )
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts()) as ydl:
+            info = ydl.extract_info(
+                url,
+                download=False
+            )
+        used_fallback = False
+
+    except Exception as e:
+        # yt-dlp extraction broken since Bilibili dropped
+        # __INITIAL_STATE__ — fall back to the web APIs.
+        try:
+            info = bili_fallback.fallback_info(url)
+            used_fallback = True
+        except HTTPException:
+            raise
+        except Exception:
+            msg = str(e)
+
+            if "login" in msg.lower():
+                msg = (
+                    "This video appears to require login "
+                    "or is not publicly accessible."
+                )
+
+            raise HTTPException(
+                422,
+                msg[:500]
+            )
+
+    formats = build_formats(info)
+
+    if not formats and not used_fallback:
+        # yt-dlp sometimes succeeds with metadata but zero usable
+        # streams (verified 2026-10-26: /en/ video URLs reached
+        # yt-dlp before normalization stripped the prefix).
+        # Fall back to the web APIs instead of reporting an
+        # empty quality list. If the fallback also yields
+        # nothing, the empty list stands (honest error).
+        try:
+            info = bili_fallback.fallback_info(url)
+            formats = build_formats(info)
+        except Exception:
+            pass
 
     return {
         "title": info.get("title") or "Bilibili video",

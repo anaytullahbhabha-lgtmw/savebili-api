@@ -4,7 +4,8 @@ Bilibili stopped embedding window.__INITIAL_STATE__ in video pages
 served to plain clients (late Sep 2026), so yt-dlp's bilibili
 extractor fails with "Unable to extract initial state". This module
 uses Bilibili's public web APIs (pagelist / playurl / view / player)
-which need no login. It only runs when yt-dlp extraction raises;
+which need no login. It runs when yt-dlp extraction raises, or
+when yt-dlp returns metadata but no usable streams;
 public response shapes of every endpoint stay unchanged.
 """
 
