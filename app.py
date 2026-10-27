@@ -248,6 +248,43 @@ def build_formats(info):
     return formats
 
 
+def _en_thumbnail(url):
+    """Best-effort cover image via yt-dlp on the /en/ variant.
+
+    Bilibili's view API (the fallback's metadata source) is
+    banned from the server's IP, so fallback results carry no
+    thumbnail and the widget shows an empty box. yt-dlp DOES
+    return a cover for the /en/ variant of the same video
+    (verified 2026-10-28, BV1MtnG6NEGF, from two IPs).
+    Only the thumbnail is taken from this call: its title and
+    uploader are the /en/ page's variants and must not
+    overwrite fallback data. Returns the URL, or None on any
+    failure — a missing thumbnail stays honestly empty.
+    """
+    try:
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+        if not (
+            host == "bilibili.com"
+            or host.endswith(".bilibili.com")
+        ):
+            return None
+        if p.path.startswith("/en/"):
+            en_url = url
+        else:
+            en_url = urlunparse(
+                p._replace(path="/en" + p.path)
+            )
+        opts = ydl_opts()
+        opts["socket_timeout"] = 15
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            meta = ydl.extract_info(en_url, download=False)
+        thumb = (meta or {}).get("thumbnail")
+        return thumb or None
+    except Exception:
+        return None
+
+
 @app.post("/api/parse")
 def parse(req: ParseRequest, ip: str = "unknown"):
 
@@ -305,6 +342,11 @@ def parse(req: ParseRequest, ip: str = "unknown"):
             formats = build_formats(info)
         except Exception:
             pass
+
+    if not info.get("thumbnail"):
+        enriched = _en_thumbnail(url)
+        if enriched:
+            info["thumbnail"] = enriched
 
     return {
         "title": info.get("title") or "Bilibili video",
